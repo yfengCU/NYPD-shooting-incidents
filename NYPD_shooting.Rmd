@@ -1,0 +1,233 @@
+---
+title: "NYPD Shooting Incidents"
+author: "Yi Lei Feng"
+date: "2024-03-04"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+
+## Importing and Cleaning Data
+
+When cleaning the data, I opted to remove spatial fields (X, Y, LAT/LONG), 
+LOC_OF_OCCUR_DESC and LOC_CLASSFCTN_DESC as I did not find value in these 
+columns for analytical purposes, particularly for the location description 
+fields as an overwhelming amount of blank values were present. 
+
+I decided to combine the date and time columns together as they were closely 
+related, and did the same for location and borough. 
+
+I also wanted to reorganize the categories for age groups to be more 
+descriptive, which will be useful particularly in visualizations in the 
+following section. Finally, I converted the MURDER_FLAG Boolean values into 
+binary numbers which is essential for both visualizations as well as when 
+constructing my model.
+
+
+```{r cleanData}
+library(tidyverse)
+library(lubridate)
+# import data 
+url <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+orig_data <- read_csv(url)
+
+# cleaning data process
+# first reformat date and remove columns that are not needed
+cleaned_data <- orig_data %>% 
+    mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+    select(c(INCIDENT_KEY:VIC_RACE)) %>%
+    select(-c('LOC_OF_OCCUR_DESC', 'LOC_CLASSFCTN_DESC'))
+
+# combine columns with related info (datetime, location)
+cleaned_data <- cleaned_data %>%
+    unite('DATETIME', c(OCCUR_DATE, OCCUR_TIME), sep = ', ', remove = FALSE) %>%
+    unite('LOCATION', c(BORO, LOCATION_DESC), sep = ', ', na.rm = TRUE) %>%
+    select(-c('OCCUR_TIME'))
+
+# transform age categorical data to be more descriptive for age groups
+cleaned_data <- cleaned_data %>%
+    mutate(PERP_AGE_GROUP = case_when(
+      PERP_AGE_GROUP == '<18' ~ 'CHILD (<18)',
+      PERP_AGE_GROUP == '18-24' ~ 'YOUNG ADULT (18-24)',
+      PERP_AGE_GROUP == '25-44' ~ 'ADULT (25-44)',
+      PERP_AGE_GROUP == '45-64' ~ 'OLDER ADULT (45-64)',
+      PERP_AGE_GROUP == '65+' ~ 'SENIOR (65+)',
+      TRUE ~ NA # all other values set to NA, for eliminating UNKNOWN values
+    )) %>%
+    mutate(VIC_AGE_GROUP = case_when(
+      is.na(VIC_AGE_GROUP) == '' ~ 'UNKNOWN',
+      VIC_AGE_GROUP == '<18' ~ 'CHILD (<18)',
+      VIC_AGE_GROUP == '18-24' ~ 'YOUNG ADULT (18-24)',
+      VIC_AGE_GROUP == '25-44' ~ 'ADULT (25-44)',
+      VIC_AGE_GROUP == '45-64' ~ 'OLDER ADULT (45-64)',
+      VIC_AGE_GROUP == '65+' ~ 'SENIOR (65+)',
+      TRUE ~ NA
+    ))
+
+# transform MURDER_FLAG to binary numerical value
+cleaned_data <- cleaned_data %>%
+    rename(MURDER = 'STATISTICAL_MURDER_FLAG') %>%
+    mutate(MURDER = as.numeric(MURDER))
+```
+
+
+## Visualizing Data
+
+Our first visualization here features a time series for incidents and deaths 
+grouped by months in the data. There are evident seasonal trends as we can see
+higher volumes of incidents peaking towards the middle of the year. A possible
+explanation for this is that there is a higher number of social events in 
+warmer weather, directly leading to more opportunity for incidents to occur.
+
+In addition, the graph reaches a peak around mid-2020, which coincided with the 
+start of the COVID-19 pandemic timeline. Deeper analysis to look into this 
+correlation, but the economic struggles and lockdowns could certainly be
+contributors to the spike.
+
+
+```{r timeSeries}
+# group and count incidents and fatalities by date (month)
+incidents_by_date <- cleaned_data %>%
+    mutate(OCCUR_MONTH = floor_date(OCCUR_DATE, "month")) %>%
+    group_by(OCCUR_MONTH) %>%
+    summarize(INCIDENTS=n(), DEATHS=sum(MURDER))
+
+# plot time series for incidents/deaths that occur by date (month)
+incidents_by_date %>%
+    ggplot(aes(x = OCCUR_MONTH, y = INCIDENTS)) +
+    geom_line(aes(color = 'INCIDENTS')) +
+    geom_point(aes(color = 'INCIDENTS')) +
+    geom_line(aes(y = DEATHS, color = 'DEATHS')) +
+    geom_point(aes(y = DEATHS, color = 'DEATHS')) +
+    theme(legend.position='bottom', axis.text.x = element_text(angle = 90)) +
+    # ensure that x-axis labels are readable by breaking into years
+    scale_x_date(date_breaks = 'years', date_labels = "%Y") +
+    labs(title = 'NYPD Shooting Incidents and Fatalities By Month')
+```
+
+
+I created a follow-up visualization containing the same time series data
+except this time the data is grouped by yea, for a different perspective.
+
+
+```{r barByYear}
+# group and count incidents and fatalities by date (year)
+incidents_by_year <- cleaned_data %>%
+    mutate(OCCUR_YEAR = floor_date(OCCUR_DATE, "year")) %>%
+    group_by(OCCUR_YEAR) %>%
+    summarize(INCIDENTS=n(), DEATHS=sum(MURDER))
+
+# plot time series year-to-year using bar graph
+incidents_by_year %>%
+    ggplot(aes(x = OCCUR_YEAR, y = INCIDENTS)) +
+    geom_bar(stat = 'identity') +
+    theme(legend.position='bottom', axis.text.x = element_text(angle = 90)) +
+    labs(title = 'NYPD Shooting Incidents and Fatalities By Year')
+```
+
+
+The final visualization weighs perpetrator versus victim age group demographics. 
+Since a lot of NA values were present in both columns, I filtered the data to
+only include rows where both column values were non-empty. The result does 
+reflect that the majority of perpetrators seem to target individuals from the
+same age group, as we might expect. 
+
+
+```{r plotPerpVictim}
+# only filter out age group data where both victim and perpetrator data exists
+perp_victim_ages <- cleaned_data %>%
+    filter(!is.na(PERP_AGE_GROUP) & !is.na(VIC_AGE_GROUP)) %>%
+    select(c('PERP_AGE_GROUP', 'VIC_AGE_GROUP'))
+
+# plot data for perpetrator vs victim demographics
+perp_victim_ages %>%
+    ggplot(aes(x = PERP_AGE_GROUP, fill = VIC_AGE_GROUP)) +
+    geom_bar(position = 'stack') +
+    theme(legend.position='bottom', 
+        legend.direction = 'vertical') +
+    labs(title = 'NYPD Shooting Incident by Age Groups', 
+         x = 'Perpetrator Age Group', y = 'Incidents')
+```
+
+
+## Modelling Data
+
+The model I selected for this dataset was a logistic regression model, with the
+dependent binary outcome being whether an incident results in murder. The reason 
+for selecting a logistic regression model is that we are working with several 
+categorical variables representing perpetrator/victim demographic groups, and
+these can be turned into independent predictor classes, making this a suitable
+model choice. 
+
+After building the model, I converted its output containing probability values 
+into 1 (murder) or 0 (non-murder) depending on whether the likelihood exceeds 
+the threshold of 0.5 (50%). The final step featured summarizing all totals and
+comparing predictions to the original dataset, computing a final accuracy
+rate for the logistic model.
+
+
+```{r modelling}
+# convert all demographic variables to factors to be used as features in model
+# only work with non NA values
+feature_data <- cleaned_data %>%
+    select(MURDER, PERP_AGE_GROUP, PERP_SEX, VIC_AGE_GROUP, VIC_SEX)
+feature_data <- na.omit(feature_data) %>%
+    mutate(across(everything(), factor))
+
+# create a logistic regression model using features above
+logistic_model <- glm(MURDER ~ ., data = feature_data, family = "binomial")
+summary(logistic_model)
+# use model to determine death/murder probabilities for incidents
+death_probs <- predict(logistic_model, type = 'response')
+# convert probabilities above 1/2 to represent death (1)
+death_preds <- ifelse(death_probs > 0.5, 1, 0)
+
+# evaluate model predictions - create table measuring predictions with actual
+res <- table(Actual = feature_data$MURDER, Prediction = death_preds)
+rownames(res) <- c("Non-Death", "Death")
+colnames(res) <- c("Non-Death", "Death")
+res
+# compute a final model accuracy rate
+model_acc <- sum(diag(res)) / sum(res) * 100
+print(paste('Model accuracy: ', model_acc))
+```
+
+
+After evaluating the model, it appears that the number of deaths predicted is 
+very low. This can be explained by the imbalance that exists inside the dataset 
+with the significantly higher volume of non-murder incidents. Future tuning of 
+the model may be beneficial to obtain overall higher precision, such as by
+adding weights to the uncommon cases that do end in murder and modifying the 
+probability threshold when predicting outcomes. 
+
+
+## Data Biases
+
+**Demographic Bias**: 
+
+There is an abundance of NA or UNKNOWN values inside the dataset that I needed
+to remove when performing visualizations. This may lead to over or under 
+representation of certain demographic groups, resulting in bias as well as
+skewing data interpretations. In an ideal world, the dataset would generalize 
+perfectly across the entire population. 
+
+
+**Reporting Bias**: 
+
+Tied closely together with demographic bias, it is valid to question the method
+of data collection used. Mainly, it may be a concern of under reporting the 
+true number of incidents, caused by a case going undetected by law enforcement,
+systemic issues, fear, or other factors. 
+
+
+**Personal Bias**: 
+
+As with any project, the author writing the report (me) will inherently have 
+personal biases. For example, the decisions made such as selecting which 
+trends to visualize and which predictors are used in the model has a sizable 
+impact in setting the story of the overall report. 
